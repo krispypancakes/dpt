@@ -4,7 +4,7 @@ The idea is to train something similar to gpt-2. However, the resources are
 very limited (one gpu). The goal is to create a model that is somewhat capable 
 of communicating in natural language with as little knowledge as possible.
 
-I shall call it d-p-t - dumb pretrained transformer.
+I shall call it d-p-t: dumb pretrained transformer.
 
 Is it possible? What kind of data is needed to train something like that? 
 Probably rather books and novels / social media posts instead of wikipedia articles and science literature.
