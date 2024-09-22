@@ -95,6 +95,17 @@ class GPT(nn.Module):
         # weight sharing scheme - saves us a lot of training params
         self.transformer.wte.weight = self.lm_head.weight
 
+        # initialize params, apply of nn.Module iterates over all submodules and applies _init_weights
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias) # by default, it is initalized with uniform distr
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal(module.weight, mean=0.0, std=0.01)
+
     def forward(self, idx, targets=None):
         # idx is of shape (B, T)
         B, T = idx.size()
