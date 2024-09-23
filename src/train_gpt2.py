@@ -202,15 +202,20 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 def main():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"training on device: {device}")
     torch.manual_seed(420)
     torch.cuda.manual_seed(420)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"training on device: {device}")
-    # num_return_sequences = 5
-    # max_length = 30
-
-    train_loader = DataLoaderLite(B=6, T=1024)
+    total_batch_size = 522240 # 524288 # 2**19 (nice number), ~.5M, in number of tokens  
+    B = 10 # micro batch size
+    T = 1024 # sequence length
+    assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+    grad_accum_steps = total_batch_size // (B * T)
+    print(f"total desired batch size: {total_batch_size}")
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+    
+    train_loader = DataLoaderLite(B=B, T=T)
     torch.set_float32_matmul_precision("high") # use TF32
 
     # get logits
@@ -222,13 +227,21 @@ def main():
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
     for step in range(50): # max_steps
         t0 = time.time()
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
-        # import code; code.interact(local=locals())
-        loss.backward()
+        loss_accum = 0.0
+        for micro_step in range(grad_accum_steps):
+            x, y = train_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                logits, loss = model(x, y)
+            # we have to scale the loss to account for gradient accumulation,
+            # because the gradients just add on each successive backward().
+            # addition of gradients corresponds to a SUM in the objective, but
+            # instead of a SUM, we want a MEAN. Scale the loss here so it comes out right
+            loss = loss / grad_accum_steps # recover the additional normalizer
+            loss_accum += loss.detach() # detach from the graph
+            # import code; code.interact(local=locals())
+            loss.backward()
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         lr = get_lr(step)
         for param_group in optimizer.param_groups:
@@ -236,41 +249,11 @@ def main():
         optimizer.step()
         torch.cuda.synchronize() # finish all the gpu work
         t1 = time.time()
-        dt = (t1 - t0) * 1000 # time diff in millisecs
-        tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
-        print(f"step {step} | loss: {loss.item()} | dt: {dt:.2f}ms | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
+        dt = (t1 - t0) # time diff in seconds
+        tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
+        tokens_per_sec = tokens_processed / dt
+        print(f"step {step} | loss: {loss_accum.item()} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
 
 
 if __name__ == "__main__":
     main()
-
-# tokens = enc.encode("Bro what the fuck, it's late already")
-# tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
-# tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
-# x = tokens.to(device)
-
-
-# # generate !
-# torch.manual_seed(420)
-# torch.cuda.manual_seed(420)
-# while x.size(1) < max_length:
-#     with torch.no_grad():
-#         logits = model(x) # (B, T, vocab_size)
-#         # take logits at the last position
-#         logits = logits[:, 1, :] # (B, vocab_size)
-#         # get the probabilities
-#         probs = F.softmax(logits, dim=-1)
-#         # do top-k sampling of 50
-#         # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-#         topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-#         ix = torch.multinomial(topk_probs, 1) # (B, 1)
-#         # gather corresponding indices
-#         xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
-#         # append to the sequence
-#         x = torch.cat((x, xcol), dim=1)
-
-# # print generated text
-# for i in range(num_return_sequences):
-#     tokens = x[i, :max_length].tolist()
-#     decoded = enc.decode(tokens)
-#     print(">", decoded)
