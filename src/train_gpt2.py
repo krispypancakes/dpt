@@ -6,6 +6,10 @@ import math
 import tiktoken
 import time
 import inspect
+import os
+import numpy as np
+
+
 
 class CausalSelfAttention(nn.Module):
 
@@ -37,10 +41,6 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         # attention (materializes the large (T,T) matrix for all the queries and keys)
 
-        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf")) # only past tokens
-        # att = F.softmax(att, dim=-1)
-        # y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side 
 
@@ -157,22 +157,28 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 
-class DataLoaderLite:
-    def __init__(self, B, T) -> None:
+def load_tokens(filename):
+    npt = np.load(filename)
+    return torch.tensor(npt, dtype=torch.long)
+
+class DataLoaderFine:
+    def __init__(self, B, T, split) -> None:
         self.B = B
         self.T = T
+        assert split in {"train", "val"}
 
-        # at init load tokens from disk and store in memory
-        with open("data/input.txt", "r") as f:
-            text = f.read()
-        enc = tiktoken.get_encoding("gpt2")
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
-        print(f"loaded {len(self.tokens)} tokens")
-        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
+        # get the shard filenames
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        self.shards = [os.path.join(data_root, s) for s in shards]
+        assert len(shards) > 0, f"no shards found for split {split}"
+        print(f"found {len(shards)} shards for split {split}")
 
-        # state
-        self.current_position = 0
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T
     
     def next_batch(self) -> None:
         B, T = self.B, self.T
@@ -183,14 +189,17 @@ class DataLoaderLite:
         self.current_position += B * T
         # if loading the next batch would be out of bounds, reset
         if self.current_position + (B * T + 1) > len(self.tokens):
-            self.current_position = 0
-        return x, y
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T
+        return x, y        
+        
 
 def get_lr(it):
     max_lr = 6e-4
     min_lr = max_lr * 0.1
-    warmup_steps = 10
-    max_steps = 50
+    warmup_steps = 715 # 375e6 tokens / 2**19 -- maybe 100 is enough ??
+    max_steps = 19073 # 19e9(unique tokens)/2**19 (total tokens in theory)
     # linear warmup
     if it < warmup_steps:
         return max_lr * (it+1) / warmup_steps
@@ -215,7 +224,8 @@ def main():
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
     
-    train_loader = DataLoaderLite(B=B, T=T)
+    train_loader = DataLoaderFine(B=B, T=T, split="train")
+    val_loader = DataLoaderFine(B=B, T=T, split="val")
     torch.set_float32_matmul_precision("high") # use TF32
 
     # get logits
@@ -253,6 +263,7 @@ def main():
         tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
         tokens_per_sec = tokens_processed / dt
         print(f"step {step} | loss: {loss_accum.item()} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
+
 
 
 if __name__ == "__main__":
