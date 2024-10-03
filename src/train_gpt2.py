@@ -33,7 +33,7 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embedding dim(n_embd)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         # nh is the number of heads, hs is head size, and C (number of channels) = nh * hs
-        # e.g. in GPT-2 (124M), n_head=12, hs=64, so nh*hs=C=768 channels in the Transformer
+        # e.g. in GPT-2 (124M), n_head=12, hs=64, so nh*hs=C=768 channels in the Transformer (like embedding size of tokens)
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -80,7 +80,7 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 1024 # max seq len or context length
     vocab_size: int = 50257 # n tokens: 50000 bpe merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 12
+    n_layer: int = 12 # probably overkill for us
     n_head: int = 12
     n_embd: int = 768 # embedding dimension
 
