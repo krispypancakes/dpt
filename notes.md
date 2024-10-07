@@ -5,3 +5,7 @@ the size comes from the vocab size: 50257 and the vector length: 768
 -> probably use a simpler tokenizer as well so we have smaller matrices
 
 context or sequence length does also play a big role.
+
+
+TODO:
+- check when what is copied to gpu and if that makes sense
