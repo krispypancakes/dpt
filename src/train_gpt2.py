@@ -244,7 +244,6 @@ def main():
     model.to(device)
     model = torch.compile(model)
 
-    # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
     for step in range(max_steps):
@@ -267,7 +266,17 @@ def main():
             print(f"validation loss: {val_loss_accum.item():4f}\n")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():4f}\n")
-            # TODO: add checkpointing as well
+            # store checkpoints
+            if step > 0 and (step % 5000 == 0 or last_step):
+                checkpoint_path = os.path.join(log_file, f"model_{step:05d}.pt")
+                checkpoint = {
+                    'model': model.state_dict(),
+                    'config': model.config,
+                    'step': step, 
+                    'val_loss': val_loss_accum.item(),
+                    'optimizer': optimizer.state_dict()
+                }
+                torch.save(checkpoint, checkpoint_path)
 
         # generate from the model once in a while
         if (step > 0 and step % 250 == 0) or last_step:
