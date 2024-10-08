@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datasets import load_from_disk
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -167,6 +168,7 @@ class DataLoaderFine:
         self.T = T
         assert split in {"train", "val"}
 
+        self.data_root = data_root
         # get the shard filenames
         shards = os.listdir(data_root)
         # we train on the numpy files
@@ -197,7 +199,12 @@ class DataLoaderFine:
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = B * T
-        return x, y        
+        return x, y
+    
+    def get_total_tokens(self) -> int:
+        ds = load_from_disk(dataset_path=self.data_root)
+        return sum([tcnt for tcnt in ds["token_count"]])
+
 
 def get_lr(it):
     # linear warmup
@@ -225,11 +232,13 @@ def main():
     max_lr = 6e-4
     min_lr = max_lr * 0.1
     warmup_steps = 715 # 375e6 tokens / 2**19 -- maybe 100 is enough ??
-    max_steps = 19073 # 19e9(unique tokens)/2**19 (total tokens in theory)
+    n_epochs = 5
+    # max_steps = 19073 # 19e9(unique tokens)/2**19 (total tokens in theory)
     val_loss_steps = 20
     total_batch_size = 524288 # 2**19 (nice number), ~.5M, in number of tokens  522240
     B = 8 # micro batch size
     T = 1024 # sequence length
+
     assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
     grad_accum_steps = total_batch_size // (B * T)
     print(f"total desired batch size: {total_batch_size}")
@@ -237,6 +246,12 @@ def main():
     
     train_loader = DataLoaderFine(B=B, T=T, split="train", data_root="data/train_fineweb_edu_369")
     val_loader = DataLoaderFine(B=B, T=T, split="val", data_root="data/val_fineweb_edu_369")
+    # total number of tokens in the dataset
+    total_token_count = train_loader.get_total_tokens()
+    steps_per_epoch = round(total_token_count / total_batch_size)
+    print(f"Number of steps in one Epoch: {steps_per_epoch}")
+    max_steps = steps_per_epoch * n_epochs
+
     torch.set_float32_matmul_precision("high") # use TF32
 
     # get logits
@@ -246,9 +261,13 @@ def main():
 
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
+    epoch = 1
     for step in range(max_steps):
         t0 = time.time()
         last_step = (step == max_steps - 1)
+
+        if step > 0 and step % steps_per_epoch == 0:
+            epoch += 1
 
         # eval every 250 steps
         if step %250 == 0 or last_step:
@@ -337,7 +356,7 @@ def main():
         dt = (t1 - t0) # time diff in seconds
         tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
         tokens_per_sec = tokens_processed / dt
-        print(f"step {step} | loss: {loss_accum.item()} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
+        print(f"epoch {epoch} | step {step} | loss: {loss_accum.item()} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
         with open(log_file, "a") as f:
             f.write(f"{step} train {loss_accum.item():6f}\n")
 
