@@ -178,7 +178,7 @@ class DataLoaderFine:
     def reset(self) -> None:
         self.current_shard = 0
         self.tokens = self.load_tokens(self.shards[self.current_shard])
-        self.current_position = self.B * self.T
+        self.current_position = 0
     
     def next_batch(self):
         B, T = self.B, self.T
@@ -193,7 +193,7 @@ class DataLoaderFine:
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             # preloaded tokens
             self.tokens = self.pre_loaded_tokens
-            self.current_position = B * T
+            self.current_position = 0
 
             self.preload_shard()
         return x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
