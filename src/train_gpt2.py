@@ -158,10 +158,6 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 
-def load_tokens(filename):
-    npt = np.load(filename).astype(np.int32)
-    return torch.tensor(npt, dtype=torch.long)
-
 class DataLoaderFine:
     def __init__(self, B, T, split, data_root) -> None:
         self.B = B
@@ -177,33 +173,44 @@ class DataLoaderFine:
         self.shards = [os.path.join(data_root, s) for s in shards]
         assert len(shards) > 0, f"no shards found for split {split}"
         print(f"found {len(shards)} shards for split {split}")
+        self.reset()
 
+    def reset(self) -> None:
         self.current_shard = 0
-        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.tokens = self.load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T
     
-    def reset(self):
-        self.current_shard = 0
-        self.tokens = load_tokens(self.shards[self.current_shard])
-        self.current_position = self.B * self.T
-    
-    def next_batch(self) -> None:
+    def next_batch(self):
         B, T = self.B, self.T
         buf = self.tokens[self.current_position : self.current_position+B*T+1]
         x = (buf[:-1]).view(B, T) # inputs
         y = (buf[1:]).view(B, T) # outputs
         # advance the position in the tensor
         self.current_position += B * T
-        # if loading the next batch would be out of bounds, reset
+        # if loading the next batch would be out of bounds, advance to next shard
         if self.current_position + (B * T + 1) > len(self.tokens):
+            # this is actually pretty cool, circular iteration
             self.current_shard = (self.current_shard + 1) % len(self.shards)
-            self.tokens = load_tokens(self.shards[self.current_shard])
+            # preloaded tokens
+            self.tokens = self.pre_loaded_tokens
             self.current_position = B * T
-        return x, y
+
+            self.preload_shard()
+        return x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     
     def get_total_tokens(self) -> int:
         ds = load_from_disk(dataset_path=self.data_root)
         return sum([tcnt for tcnt in ds["token_count"]])
+    
+    def preload_shard(self) -> None:
+        # keeps tokens of next shard in memory
+        next_shard = (self.current_shard+2) % len(self.shards)
+        self.pre_loaded_tokens = self.load_tokens(self.shards[next_shard])    
+
+    @staticmethod
+    def load_tokens(filename):
+        npt = np.load(filename).astype(np.int32)
+        return torch.tensor(npt, dtype=torch.long)
 
 
 def get_lr(it):
@@ -220,6 +227,7 @@ def get_lr(it):
 def main():
     log_file = "log.txt"
     # it does not make sense to run this on cpu
+    global device
     device = "cuda"
     print(f"training on device: {device}")
     torch.manual_seed(420)
