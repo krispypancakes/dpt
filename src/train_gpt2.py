@@ -239,8 +239,8 @@ def main():
     global max_lr, min_lr, warmup_steps, max_steps
     max_lr = 6e-4
     min_lr = max_lr * 0.1
-    warmup_steps = 715 # 375e6 tokens / 2**19 -- maybe 100 is enough ??
-    n_epochs = 5
+    warmup_steps = 200 # 375e6 tokens / 2**19 -- maybe 100 is enough ??
+    n_epochs = 10
     # max_steps = 19073 # 19e9(unique tokens)/2**19 (total tokens in theory)
     val_loss_steps = 20
     total_batch_size = 524288 # 2**19 (nice number), ~.5M, in number of tokens  522240
