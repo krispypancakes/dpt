@@ -227,9 +227,10 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 def main():
-    checkpoint_dir = os.makedirs("checkpoints", exist_ok=True)
     today = datetime.today().strftime("%m-%d")
-    log_file = os.path.join(checkpoint_dir, f"log_{today}.txt")
+    checkpoint_dir = f"checkpoints/checkpoint-{today}"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    log_file = os.path.join(checkpoint_dir, "loss.txt")
 
     # it does not make sense to run this on cpu
     global device
