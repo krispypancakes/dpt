@@ -9,6 +9,7 @@ import time
 import inspect
 import os
 import numpy as np
+from datetime import datetime
 
 
 
@@ -179,6 +180,7 @@ class DataLoaderFine:
         self.current_shard = 0
         self.tokens = self.load_tokens(self.shards[self.current_shard])
         self.current_position = 0
+        self.preload_shard()
     
     def next_batch(self):
         B, T = self.B, self.T
@@ -194,8 +196,8 @@ class DataLoaderFine:
             # preloaded tokens
             self.tokens = self.pre_loaded_tokens
             self.current_position = 0
-
             self.preload_shard()
+
         return x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     
     def get_total_tokens(self) -> int:
@@ -225,7 +227,10 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 def main():
-    log_file = "log.txt"
+    checkpoint_dir = os.makedirs("checkpoints", exist_ok=True)
+    today = datetime.today().strftime("%m-%d")
+    log_file = os.path.join(checkpoint_dir, f"log_{today}.txt")
+
     # it does not make sense to run this on cpu
     global device
     device = "cuda"
@@ -295,7 +300,8 @@ def main():
                 f.write(f"{step} val {val_loss_accum.item():4f}\n")
             # store checkpoints
             if step > 0 and (step % 5000 == 0 or last_step):
-                checkpoint_path = os.path.join(log_file, f"model_{step:05d}.pt")
+                
+                checkpoint_path = os.path.join(checkpoint_dir, f"model_{today}_{step:05d}.pt")
                 checkpoint = {
                     'model': model.state_dict(),
                     'config': model.config,
