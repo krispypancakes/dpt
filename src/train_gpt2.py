@@ -214,17 +214,18 @@ class DataLoaderFine:
         npt = np.load(filename).astype(np.int32)
         return torch.tensor(npt, dtype=torch.long)
 
+    @staticmethod
+    def get_lr(it):
+        # linear warmup
+        if it < warmup_steps:
+            return max_lr * (it+1) / warmup_steps
+        if it > max_steps:
+            return min_lr
+        decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+        return min_lr + coeff * (max_lr - min_lr)
 
-def get_lr(it):
-    # linear warmup
-    if it < warmup_steps:
-        return max_lr * (it+1) / warmup_steps
-    if it > max_steps:
-        return min_lr
-    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
-    return min_lr + coeff * (max_lr - min_lr)
 
 def main():
     today = datetime.today().strftime("%m-%d")
@@ -362,7 +363,7 @@ def main():
             # import code; code.interact(local=locals())
             loss.backward()
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        lr = get_lr(step)
+        lr = train_loader.get_lr(step)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
         optimizer.step()
@@ -374,6 +375,8 @@ def main():
         print(f"epoch {epoch} | step {step} | loss: {loss_accum.item()} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
         with open(log_file, "a") as f:
             f.write(f"{step} train {loss_accum.item():6f}\n")
+
+    print(f"Done training after {step} steps.")
 
 
 if __name__ == "__main__":
