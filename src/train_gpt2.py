@@ -229,7 +229,7 @@ class DataLoaderFine:
 
 def main():
     today = datetime.today().strftime("%m-%d")
-    checkpoint_dir = f"checkpoints/checkpoint-{today}"
+    checkpoint_dir = f"models/checkpoints/gpt/checkpoint-{today}"
     os.makedirs(checkpoint_dir, exist_ok=True)
     log_file = os.path.join(checkpoint_dir, "loss.txt")
 
