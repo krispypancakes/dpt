@@ -23,7 +23,7 @@ class GPTConfig:
     n_layer: int = 8
     n_head: int = 4
     n_embd: int = 256 # embedding dimension
-    batch_size: int = 8
+    batch_size: int = 32
 
 
 class GroupedQueryAttention(nn.Module):
@@ -382,8 +382,8 @@ def main():
         dt = (t1 - t0) # time diff in seconds
         tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
         tokens_per_sec = tokens_processed / dt
-        if step % 100 == 0:
-            print(f"epoch {epoch} | step {step} | loss: {loss_accum.item()} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
+        if step % 1 == 0: # TODO: adjust after testing!!!
+            print(f"epoch {epoch} | step {step} | loss: {loss_accum.item():.4f} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
             with open(log_file, "a") as f:
                 f.write(f"{step} train {loss_accum.item():6f}\n")
 
@@ -393,4 +393,6 @@ def main():
 if __name__ == "__main__":
     main()
 
-# 233937.97
+# 233937.97 tok/sec
+# 264648.96 tok/sec with gqa
+# 309907.14 tok/sec with bs 32
