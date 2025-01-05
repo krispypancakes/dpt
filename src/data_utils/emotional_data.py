@@ -7,26 +7,31 @@ ds = ds.select_columns("conversations")
 
 tokenizer._special_tokens["<|user|>"] = 50257
 tokenizer._special_tokens["<|assistant|>"] = 50258
-print(tokenizer._special_tokens)
+tokenizer._special_tokens["<|endofconversation|>"] = 50259
 
-def prep_convo(convs: dict, tokenizer: tiktoken.Encoding) -> list:
-    # string together one entire conversation
-    fmt_convs = []
-    for conv in convs['conversations']:
-        if conv["role"] == "user":
-            fmt_convs.append("<|user|>")
+def tokenize_conv(conv: list, tokenizer: tiktoken.Encoding) -> dict:
+    """ tokenize one conversation """
+    token_cnt = 0
+    token_conv = []
+    fmt_conv = ["<|endofconversation|>"] # start of conversation
+    for txt in conv["conversations"]:
+        fmt_conv.append("<|endoftext|>") # start of text
+        if txt["role"] == "user": # assign role
+            fmt_conv.append("<|user|>")
         else:
-            fmt_convs.append("<|assistant|>")
-        fmt_convs.append(conv["content"])
-        fmt_convs.append("<|endoftext|>")
-    convo_str = " ".join(fmt_convs)
-    tokens = tokenizer.encode(convo_str, allowed_special={"<|user|>", "<|assistant|>", "<|endoftext|>"})
-    token_cnt = len(tokens)
-    return {"tokens": tokens, "token_count": token_cnt}
+            fmt_conv.append("<|assistant|>")
+        fmt_conv.append(txt["content"]) # the actual text
+        conv_str = " ".join(fmt_conv)
+        # tokenize and allow the special ones
+        tokens = tokenizer.encode(conv_str, 
+                    allowed_special={"<|user|>", "<|assistant|>", "<|endofconversation|>", "<|endoftext|>"}) 
+    token_cnt += len(tokens)
+    token_conv.extend(tokens)
+    return {"tokens": token_conv, "token_count": token_cnt}
 
 
 def main() -> None:
-    ds_tok = ds.map(lambda x: prep_convo(x, tokenizer))
+    ds_tok = ds.map(lambda x: tokenize_conv(x, tokenizer))
     ds_tok["train"].save_to_disk(dataset_path="data/train_emo")
     ds_tok["valid"].save_to_disk(dataset_path="data/val_emo")
     ds_tok["test"].save_to_disk(dataset_path="data/test_emo")
