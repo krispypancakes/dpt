@@ -189,6 +189,38 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     return min_lr + coeff * (max_lr - min_lr)
 
+def generate(model: torch.nn.Module, enc: tiktoken.Encoding) -> None:
+            model.eval()
+            num_return_sequences = 4
+            max_length = 32
+            tokens = enc.encode("<|user|> Good morning sir, what's going on? <|assistant|> ")
+            tokens = torch.tensor(tokens, dtype=torch.long)
+            tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+            xgen = tokens.to("cuda")
+            sample_rng = torch.Generator(device="cuda")
+            sample_rng.manual_seed(42)
+            while xgen.size(1) < max_length:
+                with torch.no_grad():
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        logits, loss = model(xgen) # (B, T, vocab_size)
+                    # take the logits at the last position
+                    logits = logits[:, -1, :] # (B, vocab_size)
+                    probs = F.softmax(logits, dim=-1)
+                    # do top-k sampling of 50 (huggingface pipeline default)
+                    # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+                    topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                    # select a token from the top-k probabilities
+                    # note: multinomial does not demand the input to sum to 1
+                    ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
+                    # gather the corresponding indices
+                    xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+                    # append to the sequence
+                    xgen = torch.cat((xgen, xcol), dim=1)
+            for i in range(num_return_sequences):
+                tokens = xgen[i, :max_length].tolist()
+                decoded = enc.decode(tokens)
+                print(f"sample {i}: {decoded}")
+
 
 def main():
     config = GPTConfig
@@ -275,36 +307,7 @@ def main():
 
         # generate from the model once in a while
         if (step > 0 and step % 1000 == 0) or last_step:
-            model.eval()
-            num_return_sequences = 4
-            max_length = 32
-            tokens = enc.encode("Hello, I'm a large language model, ")
-            tokens = torch.tensor(tokens, dtype=torch.long)
-            tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-            xgen = tokens.to("cuda")
-            sample_rng = torch.Generator(device="cuda")
-            sample_rng.manual_seed(42)
-            while xgen.size(1) < max_length:
-                with torch.no_grad():
-                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                        logits, loss = model(xgen) # (B, T, vocab_size)
-                    # take the logits at the last position
-                    logits = logits[:, -1, :] # (B, vocab_size)
-                    probs = F.softmax(logits, dim=-1)
-                    # do top-k sampling of 50 (huggingface pipeline default)
-                    # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-                    topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-                    # select a token from the top-k probabilities
-                    # note: multinomial does not demand the input to sum to 1
-                    ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
-                    # gather the corresponding indices
-                    xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
-                    # append to the sequence
-                    xgen = torch.cat((xgen, xcol), dim=1)
-            for i in range(num_return_sequences):
-                tokens = xgen[i, :max_length].tolist()
-                decoded = enc.decode(tokens)
-                print(f"sample {i}: {decoded}")
+            generate(model, enc)
 
         model.train()
         optimizer.zero_grad()
@@ -346,7 +349,7 @@ if __name__ == "__main__":
 # 264648.96 tok/sec with gqa
 # 309907.14 tok/sec with bs 32
 # 318151.16
-# 316035.17 tok/sec
+# 316035.17 tok/sec with new loader
 
 
 # total number of tokens processed: step * tokens_per_batch * grad_acc_steps
