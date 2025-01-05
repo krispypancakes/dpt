@@ -3,6 +3,7 @@ from datasets import load_from_disk
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.utils.data import Dataset, DataLoader
 import math
 import tiktoken
 import time
@@ -10,6 +11,7 @@ import inspect
 import os
 import numpy as np
 from datetime import datetime
+from typing import Tuple
 
 
 @dataclass
@@ -85,7 +87,7 @@ class Block(nn.Module):
         return x
 
 
-class GPT(nn.Module):
+class DPT(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -156,71 +158,36 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 
-class DataLoaderFine:
-    def __init__(self, B, T, split, data_root) -> None:
-        self.B = B
+class EmoData(Dataset):
+    def __init__(self, T: int, data_path: str) -> None:
+        dataset = load_from_disk(dataset_path=data_path)
         self.T = T
-        assert split in {"train", "val"}
+        self.total_token_count = sum([tkcnt for tkcnt in dataset["token_count"]])
+        all_tokens = []
+        for tokens in dataset["tokens"]:
+            all_tokens.extend(tokens)
+        self.tokens = torch.tensor(all_tokens, dtype=torch.long)
 
-        self.data_root = data_root
-        # get the shard filenames
-        shards = os.listdir(data_root)
-        # we train on the numpy files
-        shards = [s for s in shards if s.split(".")[-1]=="npy"]
-        shards = sorted(shards)
-        self.shards = [os.path.join(data_root, s) for s in shards]
-        assert len(shards) > 0, f"no shards found for split {split}"
-        self.reset()
-
-    def reset(self) -> None:
-        self.current_shard = 0
-        self.tokens = self.load_tokens(self.shards[self.current_shard])
-        self.current_position = 0
-        self.preload_shard()
+    def __len__(self) -> None: 
+        return self.total_token_count - self.T - 1 # all possible training examples
     
-    def next_batch(self):
-        B, T = self.B, self.T
-        buf = self.tokens[self.current_position : self.current_position+B*T+1]
-        x = (buf[:-1]).view(B, T) # inputs
-        y = (buf[1:]).view(B, T) # outputs
-        # advance the position in the tensor
-        self.current_position += B * T
-        # if loading the next batch would be out of bounds, advance to next shard
-        if self.current_position + (B * T + 1) > len(self.tokens):
-            # this is actually pretty cool, circular iteration
-            self.current_shard = (self.current_shard + 1) % len(self.shards)
-            # preloaded tokens
-            self.tokens = self.pre_loaded_tokens
-            self.current_position = 0
-            self.preload_shard()
-
-        return x.pin_memory().to("cuda", non_blocking=True), y.pin_memory().to("cuda", non_blocking=True)
+    def __getitem__(self, idx: int) -> Tuple[torch.tensor]:
+        sequence = self.tokens[idx:idx + self.T + 1]
+        x = sequence[:-1]
+        y = sequence[1:]
+        return x, y
     
-    def get_total_tokens(self) -> int:
-        ds = load_from_disk(dataset_path=self.data_root)
-        return sum([tcnt for tcnt in ds["token_count"]])
-    
-    def preload_shard(self) -> None:
-        # keeps tokens of next shard in memory
-        next_shard = (self.current_shard+2) % len(self.shards)
-        self.pre_loaded_tokens = self.load_tokens(self.shards[next_shard])    
 
-    @staticmethod
-    def load_tokens(filename):
-        npt = np.load(filename).astype(np.int32)
-        return torch.tensor(npt, dtype=torch.long)
-
-    @staticmethod
-    def get_lr(it):
-        # linear warmup
-        if it < warmup_steps:
-            return max_lr * (it+1) / warmup_steps
-        if it > max_steps:
-            return min_lr
-        decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
-        return min_lr + coeff * (max_lr - min_lr)
+def get_lr(it):
+    # linear warmup
+    if it < warmup_steps:
+        return max_lr * (it+1) / warmup_steps
+    if it > max_steps:
+        return min_lr
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
 
 
 def main():
@@ -249,24 +216,26 @@ def main():
     assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
     grad_accum_steps = total_batch_size // (B * T)
     print(f"total desired batch size: {total_batch_size}")
-    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}") # one step is comprised of {grad_accum_steps} micro steps
     
-    train_loader = DataLoaderFine(B=B, T=T, split="train", data_root="data/train_fineweb_edu_369")
-    val_loader = DataLoaderFine(B=B, T=T, split="val", data_root="data/val_fineweb_edu_369")
+    train_data = EmoData(T=T, data_path="data/train_emo")
+    train_loader = iter(DataLoader(dataset=train_data, batch_size=B, num_workers=os.cpu_count()-4, pin_memory=True, drop_last=True))
+    val_data = EmoData(T=T, data_path="data/val_emo")
+    val_loader = iter(DataLoader(dataset=val_data, batch_size=B, num_workers=os.cpu_count()-4, pin_memory=True, drop_last=True))
+
     # total number of tokens in the dataset
-    total_token_count = train_loader.get_total_tokens()
-    steps_per_epoch = round(total_token_count / total_batch_size)
+    steps_per_epoch = round(train_data.total_token_count / total_batch_size)
     print(f"Number of steps in one Epoch: {steps_per_epoch}")
     max_steps = steps_per_epoch * n_epochs
 
     torch.set_float32_matmul_precision("high") # use TF32
 
     # get logits
-    model = GPT(config) #GPT(GPTConfig(vocab_size=50304)) 50257
-    model.to("cuda")
+    model = DPT(config)
+    model.cuda()
     model = torch.compile(model)
 
-    optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device="cuda")
+    optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4)
 
     epoch = 1
     for step in range(max_steps):
@@ -279,12 +248,11 @@ def main():
         # eval every 250 steps
         if step %500 == 0 or last_step:
             model.eval()
-            val_loader.reset()
             with torch.no_grad():
                 val_loss_accum = 0.0
                 for _ in range(val_loss_steps):
-                    x, y = val_loader.next_batch()
-                    x, y = x.to("cuda"), y.to("cuda")
+                    x, y = next(val_loader)
+                    x, y = x.cuda(non_blocking=True), y.cuda(non_blocking=True)
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                         _, loss = model(x, y)
                         loss = loss / val_loss_steps
@@ -342,8 +310,8 @@ def main():
         optimizer.zero_grad()
         loss_accum = 0.0
         for micro_step in range(grad_accum_steps):
-            x, y = train_loader.next_batch()
-            x, y = x.to("cuda"), y.to("cuda")
+            x, y = next(train_loader)
+            x, y = x.cuda(non_blocking=True), y.cuda(non_blocking=True)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits, loss = model(x, y)
             # we have to scale the loss to account for gradient accumulation,
@@ -352,17 +320,16 @@ def main():
             # instead of a SUM, we want a MEAN. Scale the loss here so it comes out right
             loss = loss / grad_accum_steps # recover the additional normalizer
             loss_accum += loss.detach() # detach from the graph
-            # import code; code.interact(local=locals())
             loss.backward()
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        lr = train_loader.get_lr(step)
+        lr = get_lr(step)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
         optimizer.step()
         torch.cuda.synchronize() # finish all the gpu work
         t1 = time.time()
         dt = (t1 - t0) # time diff in seconds
-        tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
+        tokens_processed = B * T * grad_accum_steps
         tokens_per_sec = tokens_processed / dt
         if step % 20 == 0:
             print(f"epoch {epoch} | step {step} | loss: {loss_accum.item():.4f} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
@@ -379,3 +346,7 @@ if __name__ == "__main__":
 # 264648.96 tok/sec with gqa
 # 309907.14 tok/sec with bs 32
 # 318151.16
+# 316035.17 tok/sec
+
+
+# total number of tokens processed: step * tokens_per_batch * grad_acc_steps
