@@ -10,7 +10,7 @@ tokenizer._special_tokens["<|assistant|>"] = 50258
 tokenizer._special_tokens["<|endofconversation|>"] = 50259
 
 def tokenize_conv(conv: list, tokenizer: tiktoken.Encoding) -> dict:
-    """ tokenize one conversation """
+    """ tokenize one conversation; each row of 'tokens' is an entire conversation """
     token_cnt = 0
     token_conv = []
     fmt_conv = ["<|endofconversation|>"] # start of conversation
