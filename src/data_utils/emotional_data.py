@@ -20,8 +20,9 @@ def prep_convo(convs: dict, tokenizer: tiktoken.Encoding) -> list:
         fmt_convs.append(conv["content"])
         fmt_convs.append("<|endoftext|>")
     convo_str = " ".join(fmt_convs)
-    tokens = {"tokens": tokenizer.encode(convo_str, allowed_special={"<|user|>", "<|assistant|>", "<|endoftext|>"})}
-    return tokens
+    tokens = tokenizer.encode(convo_str, allowed_special={"<|user|>", "<|assistant|>", "<|endoftext|>"})
+    token_cnt = len(tokens)
+    return {"tokens": tokens, "token_count": token_cnt}
 
 
 def main() -> None:
