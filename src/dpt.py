@@ -190,36 +190,38 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 def generate(model: torch.nn.Module, enc: tiktoken.Encoding) -> None:
-            model.eval()
-            num_return_sequences = 4
-            max_length = 32
-            tokens = enc.encode("<|user|> Good morning sir, what's going on? <|assistant|> ")
-            tokens = torch.tensor(tokens, dtype=torch.long)
-            tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-            xgen = tokens.to("cuda")
-            sample_rng = torch.Generator(device="cuda")
-            sample_rng.manual_seed(42)
-            while xgen.size(1) < max_length:
-                with torch.no_grad():
-                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                        logits, loss = model(xgen) # (B, T, vocab_size)
-                    # take the logits at the last position
-                    logits = logits[:, -1, :] # (B, vocab_size)
-                    probs = F.softmax(logits, dim=-1)
-                    # do top-k sampling of 50 (huggingface pipeline default)
-                    # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-                    topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-                    # select a token from the top-k probabilities
-                    # note: multinomial does not demand the input to sum to 1
-                    ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
-                    # gather the corresponding indices
-                    xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
-                    # append to the sequence
-                    xgen = torch.cat((xgen, xcol), dim=1)
-            for i in range(num_return_sequences):
-                tokens = xgen[i, :max_length].tolist()
-                decoded = enc.decode(tokens)
-                print(f"sample {i}: {decoded}")
+    # TODO: implement stop-tokens
+    model.eval()
+    num_return_sequences = 4
+    max_length = 200
+    tokens = enc.encode("<|user|> Good morning sir, what's going on? <|endoftext|> <|assistant|> "
+                        , allowed_special={"<|endoftext|>", "<|assistant|>", "<|user|>"})
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+    xgen = tokens.to("cuda")
+    sample_rng = torch.Generator(device="cuda")
+    sample_rng.manual_seed(42)
+    while xgen.size(1) < max_length:
+        with torch.no_grad():
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits, _ = model(xgen) # (B, T, vocab_size)
+            # take the logits at the last position
+            logits = logits[:, -1, :] # (B, vocab_size)
+            probs = F.softmax(logits, dim=-1)
+            # do top-k sampling of 50 (huggingface pipeline default)
+            # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+            # select a token from the top-k probabilities
+            # note: multinomial does not demand the input to sum to 1
+            ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
+            # gather the corresponding indices
+            xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+            # append to the sequence
+            xgen = torch.cat((xgen, xcol), dim=1)
+    for i in range(num_return_sequences):
+        tokens = xgen[i, :max_length].tolist()
+        decoded = enc.decode(tokens)
+        print(f"sample {i}: {decoded}")
 
 
 def main():
@@ -251,9 +253,9 @@ def main():
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}") # one step is comprised of {grad_accum_steps} micro steps
     
     train_data = EmoData(T=T, data_path="data/train_emo")
-    train_loader = iter(DataLoader(dataset=train_data, batch_size=B, num_workers=os.cpu_count()-4, pin_memory=True, drop_last=True))
+    train_loader = iter(DataLoader(dataset=train_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
     val_data = EmoData(T=T, data_path="data/val_emo")
-    val_loader = iter(DataLoader(dataset=val_data, batch_size=B, num_workers=os.cpu_count()-4, pin_memory=True, drop_last=True))
+    val_loader = iter(DataLoader(dataset=val_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
 
     # total number of tokens in the dataset
     steps_per_epoch = round(train_data.total_token_count / total_batch_size)
@@ -294,7 +296,6 @@ def main():
                 f.write(f"epoch:{epoch}|step:{step}|val loss{val_loss_accum.item():4f}\n")
             # store checkpoints
             if step > 0 and (step % 5000 == 0 or last_step):
-                
                 checkpoint_path = os.path.join(checkpoint_dir, f"model_{today}_{step:05d}.pt")
                 checkpoint = {
                     'model': model.state_dict(),
