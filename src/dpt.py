@@ -17,7 +17,7 @@ from typing import Tuple
 @dataclass
 class GPTConfig:
     ctx_len: int = 512 # max seq len or context length
-    vocab_size: int = 50257 # n tokens: 50000 bpe merges + 256 bytes tokens + 1 <|endoftext|> token
+    vocab_size: int = 50259 # n tokens: 50000 bpe merges + 256 bytes tokens + 1 <|endoftext|> token
     n_layer: int = 8
     n_head: int = 4
     n_embd: int = 256 # embedding dimension
@@ -189,7 +189,7 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     return min_lr + coeff * (max_lr - min_lr)
 
-def generate(model: torch.nn.Module, enc: tiktoken.Encoding) -> None:
+def generate_emo(model: torch.nn.Module, enc: tiktoken.Encoding) -> None:
     # TODO: implement stop-tokens
     model.eval()
     num_return_sequences = 4
@@ -240,8 +240,8 @@ def main():
     global max_lr, min_lr, warmup_steps, max_steps
     max_lr = 6e-4
     min_lr = max_lr * 0.1
-    warmup_steps = 100 # 375e6 tokens / 2**19 -- maybe 100 is enough ??
-    n_epochs = 10
+    warmup_steps = 40 # 100 # 375e6 tokens / 2**19 -- maybe 100 is enough ??
+    n_epochs = 300
     val_loss_steps = 20
     total_batch_size =  2**16 # 524288 # 2**19 (nice number), ~.5M, in number of tokens  522240
     B = config.batch_size # micro batch size
@@ -308,7 +308,7 @@ def main():
 
         # generate from the model once in a while
         if (step > 0 and step % 1000 == 0) or last_step:
-            generate(model, enc)
+            generate_emo(model, enc)
 
         model.train()
         optimizer.zero_grad()
@@ -335,7 +335,7 @@ def main():
         dt = (t1 - t0) # time diff in seconds
         tokens_processed = B * T * grad_accum_steps
         tokens_per_sec = tokens_processed / dt
-        if step % 20 == 0:
+        if step % 100 == 0:
             print(f"epoch {epoch} | step {step} | loss: {loss_accum.item():.4f} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
             with open(log_file, "a") as f:
                 f.write(f"epoch:{epoch}|step:{step}|train loss:{loss_accum.item():6f}\n")
