@@ -10,6 +10,9 @@ Is it possible? What kind of data is needed to train something like that?
 Probably rather books and novels / social media posts instead of wikipedia articles and science literature.
 
 # ToDos
+* sliding window attention
+* kv cache
+* proper templating for instruction finetuning
 
 ## Data
 We need a dataset that we can inspect and curate. Throwing just millions of texts at the problem won't be
