@@ -1,17 +1,15 @@
 from dataclasses import dataclass
-from datasets import load_from_disk
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import math
 import tiktoken
 import time
 import inspect
 import os
-import numpy as np
 from datetime import datetime
-from typing import Tuple
+from data.utils import EmoData, DataLoaderFine
 
 
 @dataclass
@@ -157,25 +155,6 @@ class DPT(nn.Module):
         print(f"using fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
-
-class EmoData(Dataset):
-    def __init__(self, T: int, data_path: str) -> None:
-        dataset = load_from_disk(dataset_path=data_path)
-        self.T = T
-        self.total_token_count = sum([tkcnt for tkcnt in dataset["token_count"]])
-        all_tokens = []
-        for tokens in dataset["tokens"]:
-            all_tokens.extend(tokens)
-        self.tokens = torch.tensor(all_tokens, dtype=torch.long)
-
-    def __len__(self) -> None: 
-        return self.total_token_count - self.T - 1 # all possible training examples
-    
-    def __getitem__(self, idx: int) -> Tuple[torch.tensor]:
-        sequence = self.tokens[idx:idx + self.T + 1]
-        x = sequence[:-1]
-        y = sequence[1:]
-        return x, y
     
 
 def get_lr(it):
@@ -225,9 +204,10 @@ def generate_emo(model: torch.nn.Module, enc: tiktoken.Encoding) -> None:
 
 
 def main():
+    PRETRAIN = os.environ.get("PRETRAIN", None)
     config = GPTConfig
     today = datetime.today().strftime("%m-%d")
-    checkpoint_dir = f"models/checkpoints/dpt/checkpoint-{today}"
+    checkpoint_dir = f"data/checkpoints/dpt/checkpoint-{today}"
     os.makedirs(checkpoint_dir, exist_ok=True)
     log_file = os.path.join(checkpoint_dir, "loss.txt")
 
@@ -252,10 +232,14 @@ def main():
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}") # one step is comprised of {grad_accum_steps} micro steps
     
-    train_data = EmoData(T=T, data_path="data/train_emo")
-    train_loader = iter(DataLoader(dataset=train_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
-    val_data = EmoData(T=T, data_path="data/val_emo")
-    val_loader = iter(DataLoader(dataset=val_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
+    if PRETRAIN:
+        train_loader = DataLoaderFine(B, T, data_root="data/train_fineweb_edu_369")
+        train_loader = DataLoaderFine(B, T, data_root="data/val_fineweb_edu_369")
+    else:
+        train_data = EmoData(T=T, data_path="data/train_emo")
+        train_loader = iter(DataLoader(dataset=train_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
+        val_data = EmoData(T=T, data_path="data/val_emo")
+        val_loader = iter(DataLoader(dataset=val_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
 
     # total number of tokens in the dataset
     steps_per_epoch = round(train_data.total_token_count / total_batch_size)
