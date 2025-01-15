@@ -1,6 +1,7 @@
 #!/bin/bash
 
-checkpoint_dir=checkpoints/checkpoint-$(date +"%m-%d")
+checkpoint_dir=data/checkpoints/dpt/checkpoint-$(date +"%m-%d")
 mkdir -p $checkpoint_dir
+export PRETRAIN=1 
+stdbuf -oL -eL python -u src/dpt.py 2>&1 | tee $checkpoint_dir/logfile.txt
 
-stdbuf -oL -eL python -u src/train_gpt2.py 2>&1 | tee $checkpoint_dir/logfile.txt
