@@ -23,15 +23,14 @@ class GPTConfig:
     n_kv_head = n_head // 2  # number of key/value heads
 
 
-class GroupedQueryAttention(nn.Module):
-    def __init__(self, config):
+class SelfAttention(nn.Module):
+    def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         assert config.n_head % config.n_kv_head == 0
         self.n_head = config.n_head
         self.n_query_head = config.n_head
         self.n_kv_head = config.n_kv_head
-        self.n_query_groups = self.n_query_head // self.n_kv_head
         self.head_size = config.n_embd // config.n_head
         # projects each token's embedding into n_head query vectors
         self.q_proj = nn.Linear(config.n_embd, self.n_query_head * self.head_size)
@@ -47,10 +46,8 @@ class GroupedQueryAttention(nn.Module):
         kv = kv.view(B, T, 2, self.n_kv_head, self.head_size) # [B, T, 2 * n_kv_head * head_size] -> [B, T, 2, n_kv_head, head_size]
         k, v = kv.unbind(dim=2) # split
         k = k.transpose(1, 2) # [B, T, n_kv_head, head_size] -> [B, n_kv_head, T, head_size]
-        k = k.repeat_interleave(self.n_query_groups, dim=1) # [B, n_head, T, head_size]
         v = v.transpose(1, 2)
-        v = v.repeat_interleave(self.n_query_groups, dim=1) # [B, n_head, T, head_size]
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True) # using flash attention; causal mask is handled internally here
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True, attn_mask=None) # self.swa_mask) # using flash attention; causal mask is handled internally here
         # Reshape and project output
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
@@ -75,7 +72,7 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = GroupedQueryAttention(config) # CausalSelfAttention(config)
+        self.attn = SelfAttention(config) # CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
@@ -169,7 +166,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 def generate_emo(model: torch.nn.Module, enc: tiktoken.Encoding) -> None:
-    # TODO: implement stop-tokens
+    # TODO: implement stop-tokens ?
     model.eval()
     num_return_sequences = 4
     max_length = 200
@@ -233,16 +230,19 @@ def main():
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}") # one step is comprised of {grad_accum_steps} micro steps
     
     if PRETRAIN:
+        print("PRETRAINING")
         train_loader = DataLoaderFine(B, T, data_root="data/train_fineweb_edu_369")
-        train_loader = DataLoaderFine(B, T, data_root="data/val_fineweb_edu_369")
+        val_loader = DataLoaderFine(B, T, data_root="data/val_fineweb_edu_369")
+        steps_per_epoch = train_loader.get_total_tokens()
     else:
+        print("FINETUNING")
         train_data = EmoData(T=T, data_path="data/train_emo")
         train_loader = iter(DataLoader(dataset=train_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
         val_data = EmoData(T=T, data_path="data/val_emo")
         val_loader = iter(DataLoader(dataset=val_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
+        # total number of tokens in the dataset
+        steps_per_epoch = round(train_data.total_token_count / total_batch_size)
 
-    # total number of tokens in the dataset
-    steps_per_epoch = round(train_data.total_token_count / total_batch_size)
     print(f"Number of steps in one Epoch: {steps_per_epoch}")
     max_steps = steps_per_epoch * n_epochs
 
@@ -277,7 +277,7 @@ def main():
                         val_loss_accum += loss.detach()
             print(f"validation loss: {val_loss_accum.item():4f}\n")
             with open(log_file, "a") as f:
-                f.write(f"epoch:{epoch}|step:{step}|val loss{val_loss_accum.item():4f}\n")
+                f.write(f"epoch:{epoch}|step:{step}|val loss:{val_loss_accum.item():4f}\n")
             # store checkpoints
             if step > 0 and (step % 5000 == 0 or last_step):
                 checkpoint_path = os.path.join(checkpoint_dir, f"model_{today}_{step:05d}.pt")
@@ -338,3 +338,9 @@ if __name__ == "__main__":
 
 
 # total number of tokens processed: step * tokens_per_batch * grad_acc_steps
+
+
+# without swa:  11052MiB /  12288MiB
+# with swa:     11038MiB /  12288MiB 
+
+# gqa, no swa just torch implementation: 9550MiB /  12288MiB and 312624.15 lol
