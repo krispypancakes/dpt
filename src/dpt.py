@@ -4,12 +4,17 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 import math
-import tiktoken
 import time
 import inspect
 import os
 from datetime import datetime
 from data.utils import EmoData, DataLoaderFine
+from utils import generate_seq
+import logging
+
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -90,7 +95,7 @@ class DPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.ctx_len, config.n_embd),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            hidden = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -120,7 +125,7 @@ class DPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
         x = tok_emb + pos_emb
         # forward the blocks of the transformer
-        for block in self.transformer.h:
+        for block in self.transformer.hidden:
             x = block(x)
         # forward the final layernorm and the classifier
         x = self.transformer.ln_f(x)
@@ -144,15 +149,15 @@ class DPT(nn.Module):
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params} parameters")
+        logger.info(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params} parameters")
+        logger.info(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params} parameters")
         # create adamW optim and use the fused version if available
         fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available
-        print(f"using fused AdamW: {use_fused}")
+        logger.info(f"using fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
-    
+
 
 def get_lr(it):
     # linear warmup
@@ -165,43 +170,11 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     return min_lr + coeff * (max_lr - min_lr)
 
-def generate_emo(model: torch.nn.Module, enc: tiktoken.Encoding) -> None:
-    # TODO: implement stop-tokens ?
-    model.eval()
-    num_return_sequences = 4
-    max_length = 200
-    tokens = enc.encode("<|user|> Good morning sir, what's going on? <|endoftext|> <|assistant|> "
-                        , allowed_special={"<|endoftext|>", "<|assistant|>", "<|user|>"})
-    tokens = torch.tensor(tokens, dtype=torch.long)
-    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-    xgen = tokens.to("cuda")
-    sample_rng = torch.Generator(device="cuda")
-    sample_rng.manual_seed(42)
-    while xgen.size(1) < max_length:
-        with torch.no_grad():
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits, _ = model(xgen) # (B, T, vocab_size)
-            # take the logits at the last position
-            logits = logits[:, -1, :] # (B, vocab_size)
-            probs = F.softmax(logits, dim=-1)
-            # do top-k sampling of 50 (huggingface pipeline default)
-            # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-            # select a token from the top-k probabilities
-            # note: multinomial does not demand the input to sum to 1
-            ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
-            # gather the corresponding indices
-            xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
-            # append to the sequence
-            xgen = torch.cat((xgen, xcol), dim=1)
-    for i in range(num_return_sequences):
-        tokens = xgen[i, :max_length].tolist()
-        decoded = enc.decode(tokens)
-        print(f"sample {i}: {decoded}")
-
 
 def main():
-    PRETRAIN = os.environ.get("PRETRAIN", None)
+    total_token_cnt = 0
+    pretrain = os.environ.get("PRETRAIN")
+    from_checkpoint = os.environ.get("CHECKPOINT")
     config = GPTConfig
     today = datetime.today().strftime("%m-%d")
     checkpoint_dir = f"data/checkpoints/dpt/checkpoint-{today}"
@@ -210,8 +183,6 @@ def main():
 
     torch.manual_seed(420)
     torch.cuda.manual_seed(420)
-
-    enc = tiktoken.get_encoding("gpt2")
 
     # we use those in get_lr
     global max_lr, min_lr, warmup_steps, max_steps
@@ -226,33 +197,31 @@ def main():
 
     assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
     grad_accum_steps = total_batch_size // (B * T)
-    print(f"total desired batch size: {total_batch_size}")
-    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}") # one step is comprised of {grad_accum_steps} micro steps
+    logger.info(f"total desired batch size: {total_batch_size}")
+    logger.info(f"=> calculated gradient accumulation steps: {grad_accum_steps}") # one step is comprised of {grad_accum_steps} micro steps
     
-    if PRETRAIN:
-        print("PRETRAINING")
+    if pretrain:
+        logger.info("PRETRAINING")
         train_loader = DataLoaderFine(B, T, data_root="data/train_fineweb_edu_369")
         val_loader = DataLoaderFine(B, T, data_root="data/val_fineweb_edu_369")
         steps_per_epoch = train_loader.get_total_tokens()
     else:
-        print("FINETUNING")
+        logger.info("FINETUNING")
         train_data = EmoData(T=T, data_path="data/train_emo")
         train_loader = iter(DataLoader(dataset=train_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
         val_data = EmoData(T=T, data_path="data/val_emo")
         val_loader = iter(DataLoader(dataset=val_data, batch_size=B, num_workers=os.cpu_count()-2, pin_memory=True, drop_last=True))
-        # total number of tokens in the dataset
         steps_per_epoch = round(train_data.total_token_count / total_batch_size)
-
-    print(f"Number of steps in one Epoch: {steps_per_epoch}")
+    logger.info(f"Number of steps in one Epoch: {steps_per_epoch}")
     max_steps = steps_per_epoch * n_epochs
 
     torch.set_float32_matmul_precision("high") # use TF32
 
-    # get logits
     model = DPT(config)
+    if from_checkpoint:
+        model.load_state_dict(torch.load(from_checkpoint)["model"])
     model.cuda()
     model = torch.compile(model)
-
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4)
 
     epoch = 1
@@ -275,7 +244,7 @@ def main():
                         _, loss = model(x, y)
                         loss = loss / val_loss_steps
                         val_loss_accum += loss.detach()
-            print(f"validation loss: {val_loss_accum.item():4f}\n")
+            logger.info(f"validation loss: {val_loss_accum.item():4f}\n")
             with open(log_file, "a") as f:
                 f.write(f"epoch:{epoch}|step:{step}|val loss:{val_loss_accum.item():4f}\n")
             # store checkpoints
@@ -291,8 +260,8 @@ def main():
                 torch.save(checkpoint, checkpoint_path)
 
         # generate from the model once in a while
-        if (step > 0 and step % 1000 == 0) or last_step:
-            generate_emo(model, enc)
+        if (step > 0 and step % 100 == 0) or last_step:
+            generate_seq(model)
 
         model.train()
         optimizer.zero_grad()
@@ -319,28 +288,14 @@ def main():
         dt = (t1 - t0) # time diff in seconds
         tokens_processed = B * T * grad_accum_steps
         tokens_per_sec = tokens_processed / dt
+        total_token_cnt += tokens_processed
         if step % 100 == 0:
-            print(f"epoch {epoch} | step {step} | loss: {loss_accum.item():.4f} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr:.4e}")
+            logger.info(f"epoch {epoch} | step {step} | loss: {loss_accum.item():.4f} | dt: {dt:.2f}s | tok/sec: {tokens_per_sec:.2f} | tokens processed: {total_token_cnt} | norm: {norm:.4f} | lr: {lr:.4e}")
             with open(log_file, "a") as f:
                 f.write(f"epoch:{epoch}|step:{step}|train loss:{loss_accum.item():6f}\n")
 
-    print(f"Done training after {step} steps.")
+    logger.info(f"Done training after {step} steps.")
 
 
 if __name__ == "__main__":
     main()
-
-# 233937.97 tok/sec
-# 264648.96 tok/sec with gqa
-# 309907.14 tok/sec with bs 32
-# 318151.16
-# 316035.17 tok/sec with new loader
-
-
-# total number of tokens processed: step * tokens_per_batch * grad_acc_steps
-
-
-# without swa:  11052MiB /  12288MiB
-# with swa:     11038MiB /  12288MiB 
-
-# gqa, no swa just torch implementation: 9550MiB /  12288MiB and 312624.15 lol
