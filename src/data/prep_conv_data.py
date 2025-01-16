@@ -1,7 +1,7 @@
-import tiktoken
+from transformers import AutoTokenizer
 from datasets import load_dataset
 
-tokenizer = tiktoken.get_encoding("gpt2")
+tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", token=open(".hftoken").read()) # has a vocab of only 32000
 ds = load_dataset("Estwld/empathetic_dialogues_llm")
 ds = ds.select_columns("conversations")
 
